@@ -6,8 +6,8 @@ class DatabaseManager:
     def __init__(self):
         self.server = 'localhost,1433'
         self.database = 'campus_marketplace'
-        self.username = 'sa'
-        self.password = 'DB_password'  # ⚠️ CHANGE THIS TO YOUR ACTUAL PASSWORD
+        self.username = 'SA'
+        self.password = 'IAMRICH2025#@2001'  # CHANGE THIS TO YOUR ACTUAL PASSWORD
         self.driver = '{ODBC Driver 18 for SQL Server}'
         
     def get_connection(self):
