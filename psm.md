@@ -392,6 +392,88 @@ SELECT
   - `[Order]`
   - `Order_Collection`
 
+### Views
+
+#### `views.sql`
+
+Creates three comprehensive views for reporting and analytics:
+
+##### 1. `vw_Product_Listing_Summary`
+
+**Purpose**: Provides a complete product listing view with seller and pricing information.
+
+- **Displays**:
+  - Product details (ID, name, description, status)
+  - Category information
+  - Pricing (unit price, standard price, discount amount)
+  - Available quantity
+  - Seller information (name, rating, verification status)
+  - Campus name
+  - Primary product image URL (first media link)
+- **Key Features**:
+  - Calculates discount amount automatically
+  - Shows seller's aggregate rating
+  - Includes verification status for trust indicators
+  - Optimized for marketplace browsing
+
+##### 2. `vw_Order_Transaction_Details`
+
+**Purpose**: Complete transaction lifecycle view showing order, payment, pickup, and dispute information.
+
+- **Displays**:
+  - Order details (ID, date, quantity, status)
+  - Product information (name, category, unit price)
+  - Calculated order total
+  - Buyer and seller information
+  - Escrow details (amount, status, payment dates)
+  - Pickup information (location, scheduled date/time)
+  - Rating information (value, date)
+  - Dispute flag (YES/NO)
+- **Key Features**:
+  - Joins all major transaction-related tables
+  - Calculates order total from unit price × quantity
+  - Shows complete payment timeline
+  - Identifies disputed transactions
+  - Useful for transaction tracking and reconciliation
+
+##### 3. `vw_User_Activity_Summary`
+
+**Purpose**: Comprehensive user profile and activity metrics dashboard.
+
+- **Displays**:
+  - User profile (ID, name, email, phone, verification status)
+  - Campus affiliation
+  - **Seller Metrics**:
+    - Total products listed
+    - Active listings count
+    - Products sold count
+    - Orders received as seller
+    - Total revenue earned
+  - **Buyer Metrics**:
+    - Orders placed as buyer
+    - Total amount spent
+  - **Rating Metrics**:
+    - Ratings received (count and average)
+    - Ratings given (count)
+    - Aggregate seller rating
+  - **Other Metrics**:
+    - Disputes filed
+    - Days since first listing
+- **Key Features**:
+  - Aggregates data across all user activities
+  - Separates buyer and seller statistics
+  - Calculates user tenure on platform
+  - Uses ISNULL to handle users with no transactions
+  - Ideal for user profiles, admin dashboards, and analytics
+
+**Result**: Three powerful views that support:
+- Product browsing and search functionality
+- Transaction monitoring and reporting
+- User analytics and trust scoring
+- Admin oversight and marketplace health metrics
+
+---
+
 ---
 
 ## How to Use This as a Team
