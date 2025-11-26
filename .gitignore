@@ -1,0 +1,41 @@
+# ---- Python / Virtualenv ----
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pkl
+*.log
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# ---- Streamlit ----
+# Don't commit secrets!
+.streamlit/secrets.toml
+
+# Often auto-generated config (optional to ignore)
+.streamlit/config.toml
+
+# ---- OS / Editor cruft ----
+.DS_Store
+Thumbs.db
+
+# VS Code / PyCharm
+.vscode/
+.idea/
+
+# ---- Build / tooling ----
+dist/
+build/
+*.egg-info/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+coverage.xml
+htmlcov/

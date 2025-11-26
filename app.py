@@ -308,51 +308,97 @@ def checkout_page():
         st.info("💰 Amount will be held in escrow until delivery is confirmed")
         
         if st.button("✅ Confirm Order", type="primary", use_container_width=True):
-            # Create order
-            success = db.add_order(
-                cart['product_id'],
-                cart['seller_id'],
-                st.session_state.logged_in_user['id'],
-                cart['quantity'],
-                'Confirmed'
-            )
-            
-            if success:
-                # Get the order ID
-                orders = db.get_all_orders()
-                order_id = int(orders.iloc[0]['OrderID'])  # Latest order
-                
-                # Create escrow
-                escrow_success = db.add_escrow(order_id, cart['total_price'], 'Held')
-                
-                # Create order collection
-                collection_query = f"""
-                INSERT INTO Order_Collection (Order_ID, Pickup_Point_ID)
-                VALUES ({order_id}, {pickup_point_id})
+            try:
+                # Check if product still has enough quantity
+                product_check_query = f"""
+                SELECT Quantity, Product_Status 
+                FROM Product 
+                WHERE Product_ID = {cart['product_id']}
                 """
-                db.execute_query(collection_query)
+                product_data = db.fetch_data(product_check_query)
                 
-                st.success("✅ Order placed successfully!")
-                st.balloons()
-                st.info(f"Order ID: #{order_id} | Escrow Status: Held | Amount: ${cart['total_price']:.2f}")
+                if product_data.empty:
+                    st.error("❌ Product not found.")
+                    return
                 
-                # Clear cart
-                st.session_state.cart = []
+                current_quantity = int(product_data.iloc[0]['Quantity'])
+                product_status = product_data.iloc[0]['Product_Status']
                 
-                # Show button to view orders
-                st.markdown("---")
-                if st.button("View My Orders", type="primary"):
-                    st.session_state.current_page = 'my_purchases'
-                    st.rerun()
-            else:
-                st.error("❌ Failed to create order. Please try again.")
+                if product_status != 'Active':
+                    st.error("❌ This product is no longer available.")
+                    return
+                
+                if current_quantity < cart['quantity']:
+                    st.error(f"❌ Insufficient quantity. Only {current_quantity} items available.")
+                    return
+                
+                # Create order
+                success = db.add_order(
+                    cart['product_id'],
+                    cart['seller_id'],
+                    st.session_state.logged_in_user['id'],
+                    cart['quantity'],
+                    'Confirmed'
+                )
+                
+                if success:
+                    # Get the order ID
+                    orders = db.get_all_orders()
+                    order_id = int(orders.iloc[0]['OrderID'])  # Latest order
+                    
+                    # Update product quantity
+                    new_quantity = current_quantity - cart['quantity']
+                    new_status = 'Sold' if new_quantity == 0 else 'Active'
+                    
+                    update_quantity_query = f"""
+                    UPDATE Product 
+                    SET Quantity = {new_quantity}, 
+                        Product_Status = '{new_status}'
+                    WHERE Product_ID = {cart['product_id']}
+                    """
+                    db.execute_query(update_quantity_query)
+                    
+                    # Create escrow
+                    escrow_success = db.add_escrow(order_id, cart['total_price'], 'Held')
+                    
+                    # Create order collection
+                    collection_query = f"""
+                    INSERT INTO Order_Collection (Order_ID, Pickup_Point_ID)
+                    VALUES ({order_id}, {pickup_point_id})
+                    """
+                    db.execute_query(collection_query)
+                    
+                    st.success("✅ Order placed successfully!")
+                    st.balloons()
+                    
+                    if new_quantity == 0:
+                        st.info(f"📦 Order ID: #{order_id} | Product is now SOLD OUT")
+                    else:
+                        st.info(f"📦 Order ID: #{order_id} | {new_quantity} items remaining")
+                    
+                    st.info(f"💰 Escrow Status: Held | Amount: ${cart['total_price']:.2f}")
+                    
+                    # Clear cart
+                    st.session_state.cart = []
+                    
+                    # Show button to view orders
+                    st.markdown("---")
+                    if st.button("View My Orders", type="primary"):
+                        st.session_state.current_page = 'my_purchases'
+                        st.rerun()
+                else:
+                    st.error("❌ Failed to create order. Please try again.")
+            
+            except Exception as e:
+                st.error(f"❌ Error processing order: {e}")
+                import traceback
+                st.code(traceback.format_exc())
     
     st.markdown("---")
     if st.button("← Cancel and go back"):
         st.session_state.cart = []
         st.session_state.current_page = 'product_details'
         st.rerun()
-
 # ==================== SELL ITEM ====================
 def sell_item_page():
     st.markdown("## ➕ List a New Product")
@@ -373,27 +419,37 @@ def sell_item_page():
             categories = db.get_categories()
             category = st.selectbox("Category *", categories['Category_Name'].tolist())
             
-            standard_price = st.number_input("Original Price ($) *", min_value=0.01, value=100.0, step=0.01)
-            unit_price = st.number_input("Selling Price ($) *", min_value=0.01, value=80.0, step=0.01)
+            standard_price = st.number_input("Standard Price ($) *", min_value=0.01, value=100.0, step=0.01, 
+                                            help="Original retail price of the item")
+            quantity = st.number_input("Quantity *", min_value=1, value=1, step=1,
+                                      help="Number of items available")
         
         with col2:
-            quantity = st.number_input("Quantity *", min_value=1, value=1, step=1)
+            # Calculate unit price automatically
+            unit_price = standard_price / quantity if quantity > 0 else standard_price
             
-            # Show percentage discount
-            if standard_price > 0:
-                discount = ((standard_price - unit_price) / standard_price) * 100
-                st.metric("Discount", f"{discount:.1f}%")
+            st.markdown("### Pricing Breakdown")
+            st.info(f"""
+            **Standard Price:** ${standard_price:.2f}  
+            **Quantity:** {quantity}  
+            **Unit Price:** ${unit_price:.2f}  
+            *(Price per item)*
+            """)
         
         description = st.text_area("Description *", height=150, 
                                    placeholder="Describe your item, its condition, and any important details...")
         
         st.markdown("**Note:** All fields marked with * are required")
+        st.markdown("**Unit Price** is automatically calculated as: Standard Price ÷ Quantity")
         
         submitted = st.form_submit_button("📦 List Product", type="primary", use_container_width=True)
         
         if submitted:
             if product_name and description:
                 category_id = int(categories[categories['Category_Name'] == category]['Category_ID'].iloc[0])
+                
+                # Recalculate unit price to ensure accuracy
+                unit_price = standard_price / quantity
                 
                 success = db.add_product(
                     category_id,
@@ -407,7 +463,7 @@ def sell_item_page():
                 )
                 
                 if success:
-                    st.success("✅ Product listed successfully!")
+                    st.success(f"✅ Product listed successfully! Unit price: ${unit_price:.2f}")
                     st.balloons()
                     product_added = True
                 else:
@@ -420,7 +476,6 @@ def sell_item_page():
         if st.button("View My Listings"):
             st.session_state.current_page = 'my_listings'
             st.rerun()
-
 # ==================== MY PURCHASES ====================
 def my_purchases_page():
     st.markdown("## 🛒 My Purchases")
