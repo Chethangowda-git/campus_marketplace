@@ -544,26 +544,39 @@ def checkout_page():
                         st.warning("Someone else purchased this item while you were checking out. Please try again.")
                         return
                     
-                    # Create order using stored procedure
+                    # Convert date/time to proper format
+                    sched_date = scheduled_date if scheduled_date else None
+                    sched_time = scheduled_time if scheduled_time else None
+                    
+                    # Create order using direct SQL
                     success, order_id, message = db.create_order_with_collection(
                         product_id=cart['product_id'],
                         buyer_id=st.session_state.logged_in_user['id'],
                         quantity=cart['quantity'],
                         pickup_point_id=pickup_point_id,
-                        scheduled_date=scheduled_date,
-                        scheduled_time=scheduled_time
+                        scheduled_date=sched_date,
+                        scheduled_time=sched_time
                     )
                     
                     if not success:
-                        st.error(f"❌ {message}")
+                        st.error(f"❌ Order creation failed: {message}")
                         return
                     
-                    # Create escrow
-                    escrow_success = db.add_escrow(order_id, cart['total_price'], 'Held')
+                    st.info(f"✅ Order #{order_id} created successfully!")
                     
-                    if not escrow_success:
-                        st.error("❌ Failed to create escrow")
-                        return
+                    # Check if escrow already exists (might be created by trigger)
+                    check_escrow = db.fetch_data(f"SELECT * FROM Escrow WHERE OrderID = {order_id}")
+                    
+                    if check_escrow.empty:
+                        # Create escrow if it doesn't exist
+                        escrow_success = db.add_escrow(order_id, cart['total_price'], 'Held')
+                        
+                        if not escrow_success:
+                            st.error(f"❌ Failed to create escrow for Order #{order_id}")
+                            st.error("Check terminal for detailed error message")
+                            return
+                    else:
+                        st.info("ℹ️ Escrow already exists for this order")
                     
                     # Initiate escrow verification (generate code)
                     code_success, verification_code, code_message = db.initiate_escrow_verification(order_id)

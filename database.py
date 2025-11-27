@@ -2,19 +2,24 @@ import pyodbc
 import pandas as pd
 from typing import Optional, Dict, Any, Tuple
 import time
+import warnings
 from contextlib import contextmanager
 import os
 import hashlib
 from cryptography.fernet import Fernet
 from base64 import urlsafe_b64encode
 
+import random
+
+# Suppress pandas SQLAlchemy warning for pyodbc
+warnings.filterwarnings('ignore', message='pandas only supports SQLAlchemy connectable')
 
 class DatabaseManager:
     def __init__(self):
         self.server = 'localhost,1433'
         self.database = 'campus_marketplace'
         self.username = 'SA'
-        self.password = 'IAMRICH2025#@2001'
+        self.password = 'DB_password'
         self.driver = '{ODBC Driver 18 for SQL Server}'
         self.max_retries = 3
         self.retry_delay = 1
@@ -291,125 +296,265 @@ class DatabaseManager:
             float(standard_price), float(unit_price), int(quantity), str(status)
         ))
     
-    # ==================== ORDER OPERATIONS WITH STORED PROCEDURES ====================
+    # ==================== ORDER OPERATIONS WITH DIRECT SQL ====================
     
     def create_order_with_collection(self, product_id: int, buyer_id: int, 
                                     quantity: int, pickup_point_id: int,
                                     scheduled_date=None, scheduled_time=None) -> Tuple[bool, int, str]:
         """
-        Call stored procedure: usp_CreateOrderWithCollection
+        Create order and collection using direct SQL queries (no stored procedure)
         Returns: (success, order_id, message)
         """
+        conn = None
         try:
-            with self.get_cursor() as (conn, cursor):
-                # Output parameters
-                order_id = cursor.var(int)
-                result_code = cursor.var(int)
-                result_message = cursor.var(str)
-                
-                # Call stored procedure
-                cursor.execute("""
-                    DECLARE @NewOrderID INT, @ResultCode INT, @ResultMessage NVARCHAR(400);
-                    
-                    EXEC dbo.usp_CreateOrderWithCollection
-                        @ProductID = ?,
-                        @BuyerID = ?,
-                        @Quantity = ?,
-                        @PickupPointID = ?,
-                        @ScheduledDate = ?,
-                        @ScheduledTime = ?,
-                        @NewOrderID = @NewOrderID OUTPUT,
-                        @ResultCode = @ResultCode OUTPUT,
-                        @ResultMessage = @ResultMessage OUTPUT;
-                    
-                    SELECT @NewOrderID AS OrderID, @ResultCode AS ResultCode, @ResultMessage AS ResultMessage;
-                """, (product_id, buyer_id, quantity, pickup_point_id, scheduled_date, scheduled_time))
-                
-                result = cursor.fetchone()
-                conn.commit()
-                
-                if result:
-                    new_order_id = result[0]
-                    res_code = result[1]
-                    res_message = result[2]
-                    
-                    return (res_code == 0, new_order_id if new_order_id else 0, res_message)
-                
-                return (False, 0, "No result returned from procedure")
-                
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            
+            print(f"🔍 Creating order with direct SQL:")
+            print(f"   ProductID: {product_id}, BuyerID: {buyer_id}, Quantity: {quantity}")
+            print(f"   PickupPointID: {pickup_point_id}")
+            
+            # Get seller from product
+            cursor.execute("SELECT Seller_ID, Quantity, Product_Status FROM Product WHERE Product_ID = ?", (product_id,))
+            product_result = cursor.fetchone()
+            
+            if not product_result:
+                return (False, 0, "Invalid Product_ID")
+            
+            seller_id = product_result[0]
+            available_qty = product_result[1]
+            product_status = product_result[2]
+            
+            # Validate
+            if product_status != 'Active':
+                return (False, 0, f"Product is {product_status}")
+            
+            if available_qty < quantity:
+                return (False, 0, f"Insufficient quantity. Only {available_qty} available")
+            
+            if buyer_id == seller_id:
+                return (False, 0, "Cannot buy your own product")
+            
+            # Insert Order
+            cursor.execute("""
+                INSERT INTO [Order] (Product_ID, Seller_ID, Buyer_ID, Order_Date, Quantity, Status)
+                VALUES (?, ?, ?, CAST(GETDATE() AS DATE), ?, N'Confirmed')
+            """, (product_id, seller_id, buyer_id, quantity))
+            
+            # Get the new order ID
+            cursor.execute("SELECT @@IDENTITY AS OrderID")
+            order_id = int(cursor.fetchone()[0])
+            
+            print(f"✅ Order created with ID: {order_id}")
+            
+            # Insert Order_Collection
+            cursor.execute("""
+                INSERT INTO Order_Collection (Order_ID, Pickup_Point_ID, Scheduled_Time, Scheduled_Date)
+                VALUES (?, ?, ?, ?)
+            """, (order_id, pickup_point_id, scheduled_time, scheduled_date))
+            
+            print(f"✅ Order_Collection created for Order #{order_id}")
+            
+            # Commit transaction
+            conn.commit()
+            cursor.close()
+            
+            return (True, order_id, "Order and collection created successfully")
+            
         except Exception as e:
-            print(f"Error creating order: {e}")
+            if conn:
+                conn.rollback()
+            print(f"❌ Error creating order: {e}")
+            import traceback
+            traceback.print_exc()
             return (False, 0, f"Error: {str(e)}")
+        finally:
+            if conn:
+                conn.close()
     
     def initiate_escrow_verification(self, order_id: int) -> Tuple[bool, str, str]:
         """
-        Call stored procedure: usp_InitiateEscrowVerification
+        Create escrow and generate verification code using direct SQL
         Returns: (success, verification_code, message)
         """
+        import random
+        
+        conn = None
         try:
-            with self.get_cursor() as (conn, cursor):
-                cursor.execute("""
-                    DECLARE @VerificationCode CHAR(6), @ResultCode INT, @ResultMessage NVARCHAR(400);
-                    
-                    EXEC dbo.usp_InitiateEscrowVerification
-                        @OrderID = ?,
-                        @VerificationCode = @VerificationCode OUTPUT,
-                        @ResultCode = @ResultCode OUTPUT,
-                        @ResultMessage = @ResultMessage OUTPUT;
-                    
-                    SELECT @VerificationCode AS VerificationCode, @ResultCode AS ResultCode, @ResultMessage AS ResultMessage;
-                """, (order_id,))
-                
-                result = cursor.fetchone()
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            
+            print(f"🔍 Initiating escrow for Order #{order_id}")
+            
+            # Get buyer & seller info from order
+            cursor.execute("""
+                SELECT o.Buyer_ID, u.User_Name, o.Seller_ID
+                FROM [Order] o
+                JOIN [User] u ON o.Buyer_ID = u.UserID
+                WHERE o.OrderID = ?
+            """, (order_id,))
+            
+            order_result = cursor.fetchone()
+            if not order_result:
+                return (False, "", "Order not found")
+            
+            buyer_id = order_result[0]
+            buyer_name = order_result[1]
+            seller_id = order_result[2]
+            
+            # Check if escrow exists
+            cursor.execute("SELECT EscrowID FROM Escrow WHERE OrderID = ?", (order_id,))
+            escrow_result = cursor.fetchone()
+            
+            if not escrow_result:
+                return (False, "", "Escrow record not found for this order")
+            
+            # Update escrow status to 'Held'
+            cursor.execute("""
+                UPDATE Escrow
+                SET Status = N'Held',
+                    Created_Date = ISNULL(Created_Date, GETDATE())
+                WHERE OrderID = ?
+            """, (order_id,))
+            
+            print(f"✅ Escrow status set to 'Held' for Order #{order_id}")
+            
+            # Check if verification code already exists
+            cursor.execute("SELECT Verification_Code FROM Escrow_Verification WHERE OrderID = ?", (order_id,))
+            existing_code = cursor.fetchone()
+            
+            if existing_code:
+                verification_code = existing_code[0]
                 conn.commit()
+                cursor.close()
+                return (True, verification_code, "Escrow already initiated. Returning existing verification code")
+            
+            # Generate unique 6-digit verification code
+            max_attempts = 10
+            verification_code = None
+            
+            for attempt in range(max_attempts):
+                # Generate random 6-digit code
+                code = str(random.randint(0, 999999)).zfill(6)
                 
-                if result:
-                    verification_code = result[0]
-                    res_code = result[1]
-                    res_message = result[2]
-                    
-                    return (res_code == 0, verification_code if verification_code else "", res_message)
+                # Check if code is unique
+                cursor.execute("SELECT COUNT(*) FROM Escrow_Verification WHERE Verification_Code = ?", (code,))
+                count = cursor.fetchone()[0]
                 
-                return (False, "", "No result returned from procedure")
-                
+                if count == 0:
+                    verification_code = code
+                    break
+            
+            if not verification_code:
+                return (False, "", "Unable to generate unique verification code after multiple attempts")
+            
+            print(f"✅ Generated verification code: {verification_code}")
+            
+            # Insert verification record
+            cursor.execute("""
+                INSERT INTO Escrow_Verification (OrderID, Buyer_UserID, Seller_UserID, Buyer_Name, Verification_Code)
+                VALUES (?, ?, ?, ?, ?)
+            """, (order_id, buyer_id, seller_id, buyer_name, verification_code))
+            
+            print(f"✅ Verification record created for Order #{order_id}")
+            
+            # Commit transaction
+            conn.commit()
+            cursor.close()
+            
+            return (True, verification_code, "Escrow initiated and verification code generated")
+            
         except Exception as e:
-            print(f"Error initiating escrow: {e}")
+            if conn:
+                conn.rollback()
+            print(f"❌ Error initiating escrow: {e}")
+            import traceback
+            traceback.print_exc()
             return (False, "", f"Error: {str(e)}")
+        finally:
+            if conn:
+                conn.close()
     
     def verify_escrow_code(self, order_id: int, seller_id: int, entered_code: str) -> Tuple[bool, str]:
         """
-        Call stored procedure: usp_VerifyEscrowCodeAndCompletePayment
+        Verify code and complete payment using direct SQL
         Returns: (success, message)
         """
+        conn = None
         try:
-            with self.get_cursor() as (conn, cursor):
-                cursor.execute("""
-                    DECLARE @IsVerified BIT, @ResultCode INT, @ResultMessage NVARCHAR(400);
-                    
-                    EXEC dbo.usp_VerifyEscrowCodeAndCompletePayment
-                        @OrderID = ?,
-                        @SellerID = ?,
-                        @EnteredCode = ?,
-                        @IsVerified = @IsVerified OUTPUT,
-                        @ResultCode = @ResultCode OUTPUT,
-                        @ResultMessage = @ResultMessage OUTPUT;
-                    
-                    SELECT @IsVerified AS IsVerified, @ResultCode AS ResultCode, @ResultMessage AS ResultMessage;
-                """, (order_id, seller_id, entered_code))
-                
-                result = cursor.fetchone()
-                conn.commit()
-                
-                if result:
-                    is_verified = result[0]
-                    res_message = result[2]
-                    return (bool(is_verified), res_message)
-                
-                return (False, "No result returned from procedure")
-                
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            
+            print(f"🔍 Verifying code for Order #{order_id}")
+            
+            # Load verification data
+            cursor.execute("""
+                SELECT Verification_Code, Is_Used, Seller_UserID
+                FROM Escrow_Verification
+                WHERE OrderID = ?
+            """, (order_id,))
+            
+            verification_result = cursor.fetchone()
+            
+            if not verification_result:
+                return (False, "No verification code found for this order")
+            
+            stored_code = verification_result[0]
+            is_used = verification_result[1]
+            stored_seller_id = verification_result[2]
+            
+            # Validate seller
+            if stored_seller_id != seller_id:
+                return (False, "Seller mismatch. You are not authorized for this order")
+            
+            # Check if already used
+            if is_used:
+                return (False, "Code already used")
+            
+            # Check code accuracy
+            if stored_code != entered_code:
+                return (False, "Invalid verification code")
+            
+            print(f"✅ Verification code matched!")
+            
+            # Update escrow status to 'Released'
+            cursor.execute("""
+                UPDATE Escrow
+                SET Status = N'Released',
+                    Release_Date = GETDATE()
+                WHERE OrderID = ?
+            """, (order_id,))
+            
+            print(f"✅ Escrow status set to 'Released' for Order #{order_id}")
+            
+            # Delete verification code (one-time use)
+            cursor.execute("DELETE FROM Escrow_Verification WHERE OrderID = ?", (order_id,))
+            
+            print(f"✅ Verification code destroyed for Order #{order_id}")
+            
+            # Update order status to 'Delivered'
+            cursor.execute("""
+                UPDATE [Order]
+                SET Status = N'Delivered'
+                WHERE OrderID = ?
+            """, (order_id,))
+            
+            # Commit transaction
+            conn.commit()
+            cursor.close()
+            
+            return (True, "Code verified and payment completed")
+            
         except Exception as e:
-            print(f"Error verifying code: {e}")
+            if conn:
+                conn.rollback()
+            print(f"❌ Error verifying code: {e}")
+            import traceback
+            traceback.print_exc()
             return (False, f"Error: {str(e)}")
+        finally:
+            if conn:
+                conn.close()
     
     def get_verification_code(self, order_id: int) -> Optional[str]:
         """Retrieve verification code for an order"""
@@ -447,7 +592,13 @@ class DatabaseManager:
         INSERT INTO Escrow (OrderID, Amount, Status, Created_Date)
         VALUES (?, ?, ?, GETDATE())
         """
-        return self.execute_query(query, (int(order_id), float(amount), str(status)))
+        try:
+            return self.execute_query(query, (int(order_id), float(amount), str(status)))
+        except Exception as e:
+            print(f"Error adding escrow: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
     
     def update_escrow_status(self, escrow_id: int, status: str) -> bool:
         if status == 'Released' or status == 'Refunded':
