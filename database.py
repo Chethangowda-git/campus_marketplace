@@ -3,6 +3,11 @@ import pandas as pd
 from typing import Optional, Dict, Any, Tuple
 import time
 from contextlib import contextmanager
+import os
+import hashlib
+from cryptography.fernet import Fernet
+from base64 import urlsafe_b64encode
+
 
 class DatabaseManager:
     def __init__(self):
@@ -13,6 +18,13 @@ class DatabaseManager:
         self.driver = '{ODBC Driver 18 for SQL Server}'
         self.max_retries = 3
         self.retry_delay = 1
+
+        # === Encryption setup for phone + password ===
+        # Use an environment variable in real deployments
+        base_key = os.environ.get("APP_SECRET_KEY", "super-secret-key-for-demo-1234")
+        # Fernet requires a 32-byte urlsafe base64 key
+        key = urlsafe_b64encode(base_key.encode("utf-8")[:32].ljust(32, b'0'))
+        self.fernet = Fernet(key)
         
     def get_connection(self):
         """Create database connection with retry logic"""
@@ -71,36 +83,95 @@ class DatabaseManager:
         except Exception as e:
             print(f"Error fetching data: {e}")
             return pd.DataFrame()
+        
+    # ==================== SECURITY HELPERS ====================
+
+    def hash_password(self, password: str) -> str:
+        """Hash password using PBKDF2 (salt:hash hex string)."""
+        salt = os.urandom(16)
+        pwd_hash = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt, 100_000)
+        return salt.hex() + ':' + pwd_hash.hex()
+
+    def verify_password(self, password: str, stored: str) -> bool:
+        """Verify password against stored salt:hash."""
+        try:
+            salt_hex, hash_hex = stored.split(':')
+            salt = bytes.fromhex(salt_hex)
+            stored_hash = bytes.fromhex(hash_hex)
+            pwd_hash = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt, 100_000)
+            return pwd_hash == stored_hash
+        except Exception:
+            return False
+
+    def encrypt_phone(self, phone: str) -> str:
+        """Encrypt phone number using Fernet."""
+        if phone is None:
+            return None
+        token = self.fernet.encrypt(str(phone).encode('utf-8'))
+        return token.decode('utf-8')
+
+    def decrypt_phone(self, encrypted_phone: str) -> str:
+        """Decrypt phone number; return empty string on failure."""
+        try:
+            if encrypted_phone is None:
+                return ""
+            return self.fernet.decrypt(encrypted_phone.encode('utf-8')).decode('utf-8')
+        except Exception:
+            return ""
     
     # ==================== AUTHENTICATION ====================
-    
+
+    # ==================== AUTHENTICATION ====================
+
     def authenticate_user(self, email: str, password: str) -> Optional[Dict]:
-        """Authenticate user with email and password (simple string match for now)"""
+        """
+        Authenticate user with email + password against [User] table.
+
+        - For seeded demo users with NULL Encrypted_Password → accept any non-empty password.
+        - For newly registered users → verify hashed password.
+        """
         try:
             query = """
-            SELECT u.UserID, u.User_Name, u.Email_ID, u.Phone_number,
-                   u.Verification_Status, u.Agg_Seller_Rating, c.Campus_Name
+            SELECT u.UserID,
+                   u.User_Name,
+                   u.Email_ID,
+                   u.Phone_number,
+                   u.Verification_Status,
+                   u.Agg_Seller_Rating,
+                   u.Encrypted_Password,
+                   c.Campus_Name
             FROM [User] u
             JOIN Campus c ON u.CampusID = c.CampusID
             WHERE u.Email_ID = ?
             """
             user_df = self.fetch_data(query, (email,))
-            
-            if not user_df.empty:
-                # For now, simple password check (in production, use encrypted comparison)
-                # Since we don't have passwords in sample data, we'll accept any password
-                # In real implementation, decrypt and compare
-                user = user_df.iloc[0]
-                return {
-                    'id': int(user['UserID']),
-                    'name': str(user['User_Name']),
-                    'email': str(user['Email_ID']),
-                    'phone': str(user['Phone_number']),
-                    'rating': float(user['Agg_Seller_Rating']),
-                    'verification': str(user['Verification_Status']),
-                    'campus': str(user['Campus_Name'])
-                }
-            return None
+
+            if user_df.empty:
+                return None
+
+            user = user_df.iloc[0]
+            stored_hash = user['Encrypted_Password']
+
+            # Seed data path: no encrypted password yet → accept any non-empty password
+            if stored_hash is None or str(stored_hash).strip() == "":
+                if not password:
+                    return None  # require at least something
+            else:
+                # Normal path: verify hashed password
+                if not self.verify_password(password, str(stored_hash)):
+                    return None
+
+            # Return user info for session
+            return {
+                'id': int(user['UserID']),
+                'name': str(user['User_Name']),
+                'email': str(user['Email_ID']),
+                'phone': str(user['Phone_number']),   # we keep showing plain phone
+                'rating': float(user['Agg_Seller_Rating']),
+                'verification': str(user['Verification_Status']),
+                'campus': str(user['Campus_Name'])
+            }
+
         except Exception as e:
             print(f"Authentication error: {e}")
             return None
@@ -116,6 +187,82 @@ class DatabaseManager:
         ORDER BY u.UserID
         """
         return self.fetch_data(query)
+    
+        # ==================== REGISTRATION (WITH USER_LOOKUP) ====================
+
+        # ==================== REGISTRATION (WITH USER_LOOKUP) ====================
+
+    def register_user(
+        self,
+        name: str,
+        email: str,
+        phone: str,
+        password: str,
+        campus_id: int,
+        verification_status: str = "Verified"
+    ) -> Tuple[bool, str]:
+        """
+        Register a new user if:
+          - email exists in User_Lookup.Neu_Email
+          - email does not already exist in [User].Email_ID
+
+        Stores:
+          - Phone_number: plain phone (for display)
+          - Encrypted_Phone: encrypted with Fernet
+          - Encrypted_Password: salted hash
+        """
+        try:
+            # 1) Check NEU eligibility from User_Lookup
+            lookup_query = "SELECT Expected_User_Name, Neu_Email FROM User_Lookup WHERE Neu_Email = ?"
+            lookup_df = self.fetch_data(lookup_query, (email,))
+            if lookup_df.empty:
+                return False, "Email not recognized as a Northeastern student. Please use your NEU email."
+
+            # 2) Check if already registered in [User]
+            existing_query = "SELECT UserID FROM [User] WHERE Email_ID = ?"
+            existing_df = self.fetch_data(existing_query, (email,))
+            if not existing_df.empty:
+                return False, "An account with this email already exists. Please log in instead."
+
+            # 3) Encrypt phone and hash password
+            encrypted_phone = self.encrypt_phone(phone)
+            hashed_password = self.hash_password(password)
+
+            # 4) Insert into [User]
+            insert_query = """
+            INSERT INTO [User] (
+                CampusID,
+                User_Name,
+                Verification_Status,
+                Phone_number,
+                Agg_Seller_Rating,
+                Email_ID,
+                Encrypted_Password,
+                Encrypted_Phone
+            )
+            VALUES (?, ?, ?, ?, 0, ?, ?, ?)
+            """
+            ok = self.execute_query(
+                insert_query,
+                (
+                    int(campus_id),
+                    str(name),
+                    str(verification_status),
+                    str(phone),          # plain phone for UI
+                    str(email),
+                    hashed_password,
+                    encrypted_phone
+                )
+            )
+
+            if not ok:
+                return False, "Failed to register user due to a database error."
+
+            return True, "Account created successfully. You can now log in."
+
+        except Exception as e:
+            print(f"Registration error: {e}")
+            return False, f"Error while registering: {str(e)}"
     
     # ==================== PRODUCT OPERATIONS ====================
     
@@ -432,3 +579,8 @@ class DatabaseManager:
             
         except Exception as e:
             return (False, 0, f"Error: {str(e)}")
+    
+    def get_campuses(self) -> pd.DataFrame:
+        """Return list of campuses."""
+        query = "SELECT CampusID, Campus_Name FROM Campus ORDER BY Campus_Name"
+        return self.fetch_data(query)

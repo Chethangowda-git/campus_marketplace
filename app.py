@@ -253,45 +253,78 @@ def show_verification_code(code, order_id):
 def login_page():
     st.markdown('<p class="main-header">🎓 Campus Marketplace</p>', unsafe_allow_html=True)
     st.markdown("<h3 style='text-align: center; color: #b0b0b0;'>Secure Peer-to-Peer Trading for NEU Students</h3>", unsafe_allow_html=True)
-    
-    col1, col2, col3 = st.columns([1, 2, 1])
-    
-    with col2:
-        st.markdown("### 🔐 Login")
-        
-        users = db.get_all_users()
-        if not users.empty:
-            user_options = ["-- Select User --"] + [
-                f"{row['User_Name']} ({row['Email_ID']})" 
-                for _, row in users.iterrows()
-            ]
-            
-            selected = st.selectbox("Select your account:", user_options, key="login_select")
-            
-            if selected != "-- Select User --":
-                user_email = selected.split('(')[1].split(')')[0]
-                user_data = users[users['Email_ID'] == user_email].iloc[0]
-                
-                # Simple authentication (password field for demo)
-                password = st.text_input("Password:", type="password", placeholder="Enter any password (demo mode)")
-                
-                if st.button("🚀 Login", type="primary", use_container_width=True):
-                    if password:  # Accept any password in demo mode
-                        st.session_state.logged_in_user = {
-                            'id': int(user_data['UserID']),
-                            'name': str(user_data['User_Name']),
-                            'email': str(user_data['Email_ID']),
-                            'phone': str(user_data['Phone_number']),
-                            'rating': float(user_data['Agg_Seller_Rating']),
-                            'verification': str(user_data['Verification_Status']),
-                            'campus': str(user_data['Campus_Name'])
-                        }
-                        st.session_state.current_page = 'marketplace'
-                        st.rerun()
-                    else:
-                        st.warning("Please enter a password")
-        else:
-            st.error("No users found. Please run the DML script first.")
+
+    tab_login, tab_register = st.tabs(["🔐 Login", "🆕 Register"])
+
+    # ==================== LOGIN TAB ====================
+    with tab_login:
+        st.subheader("Login to your account")
+
+        email = st.text_input("NEU Email", placeholder="yourname@northeastern.edu", key="login_email")
+        password = st.text_input("Password", type="password", placeholder="Enter your password", key="login_password")
+
+        if st.button("🚀 Login", type="primary", use_container_width=True):
+            if not email or not password:
+                st.warning("Please enter both email and password.")
+            else:
+                user = db.authenticate_user(email.strip(), password)
+                if user is None:
+                    st.error("Invalid email or password.")
+                else:
+                    st.session_state.logged_in_user = user
+                    st.session_state.current_page = 'marketplace'
+                    st.success("Logged in successfully!")
+                    st.rerun()
+
+    # ==================== REGISTER TAB ====================
+    with tab_register:
+        st.subheader("Create a new account")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            reg_name = st.text_input("Full Name *", key="reg_name")
+            reg_email = st.text_input("NEU Email *", placeholder="yourname@northeastern.edu", key="reg_email")
+            reg_phone = st.text_input("Phone Number *", placeholder="e.g. 617-555-1234", key="reg_phone")
+
+        with col2:
+            campuses = db.get_campuses()
+            if campuses.empty:
+                st.error("No campuses found. Please ensure Campus table is populated.")
+                reg_campus_id = None
+            else:
+                campus_options = {
+                    row["Campus_Name"]: int(row["CampusID"])
+                    for _, row in campuses.iterrows()
+                }
+                selected_campus_name = st.selectbox("Campus *", list(campus_options.keys()), key="reg_campus")
+                reg_campus_id = campus_options[selected_campus_name] if selected_campus_name else None
+
+            reg_password = st.text_input("Password *", type="password", key="reg_password")
+            reg_confirm = st.text_input("Confirm Password *", type="password", key="reg_confirm")
+
+        if st.button("🆕 Create Account", type="primary", use_container_width=True):
+            # Basic validation
+            if not reg_name or not reg_email or not reg_phone or not reg_password or not reg_confirm:
+                st.warning("Please fill in all required fields.")
+            elif reg_password != reg_confirm:
+                st.error("Passwords do not match.")
+            elif reg_campus_id is None:
+                st.error("Please select a campus.")
+            else:
+                success, message = db.register_user(
+                    name=reg_name.strip(),
+                    email=reg_email.strip(),
+                    phone=reg_phone.strip(),
+                    password=reg_password,
+                    campus_id=reg_campus_id,
+                    verification_status="Verified"  # or "Pending" if you want manual approval
+                )
+                if success:
+                    st.success(message)
+                    st.info("You can now go to the Login tab and sign in.")
+                else:
+                    st.error(message)
 
 # ==================== MARKETPLACE PAGE ====================
 
