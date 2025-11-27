@@ -252,7 +252,7 @@ def show_verification_code(code, order_id):
 
 def login_page():
     st.markdown('<p class="main-header">🎓 Campus Marketplace</p>', unsafe_allow_html=True)
-    st.markdown("<h3 style='text-align: center; color: #b0b0b0;'>Secure Peer-to-Peer Trading for NEU Students</h3>", unsafe_allow_html=True)
+    st.markdown("<h3 style='text-align: center; color: #b0b0b0;'> Marketplace for NU Students</h3>", unsafe_allow_html=True)
 
     tab_login, tab_register = st.tabs(["🔐 Login", "🆕 Register"])
 
